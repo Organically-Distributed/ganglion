@@ -171,7 +171,58 @@ pub(crate) fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => std::path::Path::new("."),
     };
-    std::fs::File::open(parent)?.sync_all()
+    #[cfg(unix)]
+    {
+        std::fs::File::open(parent)?.sync_all()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Directory handles need backup semantics. Flushing requires write access.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(parent)?
+            .sync_all()
+    }
+}
+
+#[cfg(test)]
+mod directory_sync_tests {
+    #[test]
+    fn syncs_parent_after_file_creation_and_replacement() {
+        use std::io::Write;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ganglion-parent-sync-{}-{nonce}", std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("state");
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"first").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        super::fsync_parent_dir(&path).unwrap();
+        let replacement = root.join("replacement");
+        let mut file = std::fs::File::create(&replacement).unwrap();
+        file.write_all(b"second").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        std::fs::rename(&replacement, &path).unwrap();
+        super::fsync_parent_dir(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
 }
 
 /// Shared atomic counters for durability-path observability.

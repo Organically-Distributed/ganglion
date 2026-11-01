@@ -748,18 +748,47 @@ mod tests {
         std::env::temp_dir().join(format!("ganglion-tcp-{tag}-{}-{nanos}", std::process::id()))
     }
 
+    // Refusal verification has a 200 ms budget. Real TCP refusal may take
+    // longer on Windows, so its classification and the verifier are tested
+    // separately. Idle monitoring still uses a real first socket and EOF.
+    struct RefuseAfterFirstDialer {
+        first: std::sync::atomic::AtomicBool,
+    }
+    impl RaftDialer for RefuseAfterFirstDialer {
+        type Stream = tokio::net::TcpStream;
+
+        async fn dial(&self, addr: &str) -> io::Result<Self::Stream> {
+            if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                tokio::net::TcpStream::connect(addr).await
+            } else {
+                Err(io::ErrorKind::ConnectionRefused.into())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_dialer_classifies_a_real_refusal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let error = tokio::time::timeout(Duration::from_secs(5), TokioDialer.dial(&addr))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
     #[tokio::test]
     async fn explicit_refusal_is_verified_without_waiting_for_another_raft_call() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
         let health = super::super::peer_health::PeerHealth::default();
         let observed = health.subscribe();
         let mut conn = DialerRaftConnection {
             target: 2,
-            addr: addr.to_string(),
+            addr: "refused".into(),
             format: WireFormat::MessagePack,
-            dialer: Arc::new(TokioDialer),
+            dialer: Arc::new(RefuseAfterFirstDialer {
+                first: std::sync::atomic::AtomicBool::new(false),
+            }),
             stream: None,
             idle: None,
             health,
@@ -879,7 +908,9 @@ mod tests {
             target: 2,
             addr: addr.to_string(),
             format: WireFormat::MessagePack,
-            dialer: Arc::new(TokioDialer),
+            dialer: Arc::new(RefuseAfterFirstDialer {
+                first: std::sync::atomic::AtomicBool::new(true),
+            }),
             stream: None,
             idle: None,
             health,

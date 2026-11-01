@@ -1,0 +1,52 @@
+name: Native Rust tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/rust-ci.yaml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/rust-ci.yaml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+
+permissions:
+  contents: read
+
+jobs:
+  workspace-tests:
+    name: Workspace tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      CARGO_BUILD_JOBS: ${{ matrix.os == 'windows-latest' && 2 || 4 }}
+    defaults:
+      run:
+        working-directory: ganglion
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ganglion
+      # The optional storage backend uses the sibling Keratin workspace.
+      - uses: actions/checkout@v4
+        with:
+          repository: Organically-Distributed/keratin
+          path: keratin
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ganglion -> target
+      - name: Run workspace tests
+        run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
+      - name: Run optional backend tests
+        run: cargo test --workspace --all-features --locked --no-fail-fast -- --test-threads=1
